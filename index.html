@@ -1,0 +1,120 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Gemini Streaming Demo</title>
+    <style>
+        body { font-family: sans-serif; display: flex; flex-direction: column; align-items: center; }
+        #controls button { font-size: 1.2rem; padding: 10px; margin: 10px; }
+        #recordButton.recording { background-color: #ff4136; color: white; }
+        #log { border: 1px solid #ccc; width: 500px; height: 400px; overflow-y: scroll; padding: 10px; margin-top: 20px;}
+        .status { font-style: italic; color: #555; }
+        .user-text { color: #0074D9; font-weight: bold;}
+    </style>
+</head>
+<body>
+    <h1>Gemini Streaming Demo (Record & Send)</h1>
+    <div id="controls">
+        <button id="connectButton">🔌 Connect</button>
+        <button id="recordButton" disabled>🎤 Record</button>
+    </div>
+    <div id="log">
+        <p class="status">Connect to the server to begin.</p>
+    </div>
+
+    <script>
+        const connectButton = document.getElementById('connectButton');
+        const recordButton = document.getElementById('recordButton');
+        const logDiv = document.getElementById('log');
+
+        let websocket;
+        let mediaRecorder;
+        let audioChunks = [];
+
+        connectButton.onclick = () => {
+            const apiKey = prompt("Please enter your Gemini API key:");
+            if (!apiKey) {
+                logDiv.innerHTML = '<p class="status" style="color:red;">An API key is required.</p>';
+                return;
+            }
+
+            logDiv.innerHTML = '<p class="status">Connecting...</p>';
+            websocket = new WebSocket('ws://localhost:8000/ws');
+
+            websocket.onopen = () => {
+                websocket.send(JSON.stringify({ key: apiKey }));
+                logDiv.innerHTML = '<p class="status">✅ Connected! Click "Record" to speak.</p>';
+                connectButton.disabled = true;
+                recordButton.disabled = false;
+            };
+
+            websocket.onmessage = (event) => {
+                logDiv.innerHTML += event.data;
+                logDiv.scrollTop = logDiv.scrollHeight;
+            };
+
+            websocket.onclose = (event) => {
+                logDiv.innerHTML += `<p class="status">Connection closed: ${event.reason || 'Normal closure'}</p>`;
+                connectButton.disabled = false;
+                recordButton.disabled = true;
+            };
+
+            websocket.onerror = (error) => {
+                console.error('WebSocket Error:', error);
+                logDiv.innerHTML += '<p class="status" style="color:red;">Connection error.</p>';
+            };
+        };
+
+        recordButton.onclick = () => {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+                // Stop recording
+                mediaRecorder.stop();
+                recordButton.textContent = '🎤 Record';
+                recordButton.classList.remove('recording');
+                logDiv.innerHTML += '<p class="status">Processing audio...</p>';
+            } else {
+                // Start recording
+                navigator.mediaDevices.getUserMedia({ audio: true })
+                    .then(stream => {
+                        mediaRecorder = new MediaRecorder(stream);
+                        mediaRecorder.start();
+                        
+                        audioChunks = [];
+                        mediaRecorder.addEventListener("dataavailable", event => {
+                            audioChunks.push(event.data);
+                        });
+                        
+                        mediaRecorder.addEventListener("stop", () => {
+                            const audioBlob = new Blob(audioChunks);
+                            // The backend expects raw 16-bit PCM, not a WAV/MP3 blob.
+                            // We need to decode it first.
+                            decodeAudioBlob(audioBlob);
+                        });
+
+                        recordButton.textContent = '🛑 Stop';
+                        recordButton.classList.add('recording');
+                        logDiv.innerHTML = '<p class="status">Recording... Click "Stop" when done.</p>';
+                    });
+            }
+        };
+
+        async function decodeAudioBlob(audioBlob) {
+            const audioContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+            const arrayBuffer = await audioBlob.arrayBuffer();
+            const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+            const pcmData = audioBuffer.getChannelData(0);
+
+            // Convert float32 to 16-bit PCM
+            const pcmInt16 = new Int16Array(pcmData.length);
+            for (let i = 0; i < pcmData.length; i++) {
+                pcmInt16[i] = pcmData[i] * 0x7FFF;
+            }
+
+            if (websocket && websocket.readyState === WebSocket.OPEN) {
+                logDiv.innerHTML += `<p class="user-text">You said (sending audio)...</p><p><strong>Gemini:</strong> `;
+                websocket.send(pcmInt16.buffer);
+            }
+        }
+    </script>
+</body>
+</html>
